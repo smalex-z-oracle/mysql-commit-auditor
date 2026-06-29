@@ -1,0 +1,42 @@
+name: Code submission guard
+
+on:
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created, edited]
+  discussion:
+    types: [created, edited]
+  discussion_comment:
+    types: [created, edited]
+  workflow_dispatch:
+    inputs:
+      self_test:
+        description: Run the local classifier self-test instead of handling an event.
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  issues: write
+  discussions: write
+
+jobs:
+  guard:
+    name: Classify community code submissions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out guard script
+        uses: actions/checkout@v4
+
+      - name: Run classifier self-test
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.self_test }}
+        run: node .github/scripts/code-submission-guard.js --self-test
+
+      - name: Run guard
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.self_test) }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node .github/scripts/code-submission-guard.js
