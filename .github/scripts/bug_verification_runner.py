@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import html
 import json
 import os
@@ -28,6 +27,7 @@ from bug_verification_triage import (
     TRIAGE_MARKER,
     TRIAGE_BOT,
     AssessmentError,
+    assessment_digest,
     github_request,
     issue_declares_security,
     list_issue_comments,
@@ -196,32 +196,6 @@ def assessment_from_comment(
     if not assessment["recommended_targets"]:
         raise AssessmentError("the assessment does not recommend an execution target")
     return assessment
-
-
-def github_timestamp(value: Any, field: str) -> datetime:
-    if not isinstance(value, str):
-        raise AssessmentError(f"{field} is missing")
-    try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as error:
-        raise AssessmentError(f"{field} is invalid") from error
-
-
-def ensure_assessment_predates_run(
-    triage_comment: dict[str, Any], issue_snapshot: dict[str, Any]
-) -> None:
-    assessed_at = github_timestamp(triage_comment.get("updated_at"), "triage updated_at")
-    run_requested_at = github_timestamp(issue_snapshot.get("updated_at"), "issue updated_at")
-    if assessed_at > run_requested_at:
-        raise AssessmentError(
-            "the triage assessment changed after verification:run was requested; "
-            "remove and reapply the label after reviewing the new assessment"
-        )
-
-
-def assessment_digest(assessment: dict[str, Any]) -> str:
-    canonical = json.dumps(assessment, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def mysql_client_command(container: str, user: str, *, database: bool = True) -> list[str]:
@@ -620,8 +594,12 @@ def run_github_event(event_path: Path) -> None:
     triage_comment = find_bot_triage_comment(comments)
     if triage_comment is None:
         raise AssessmentError("no GitHub Actions triage assessment was found")
-    ensure_assessment_predates_run(triage_comment, issue)
     assessment = assessment_from_comment(triage_comment, lines)
+    expected_digest = os.environ.get("EXPECTED_ASSESSMENT_DIGEST")
+    if not expected_digest:
+        raise AssessmentError("the triage job did not provide an approved assessment digest")
+    if assessment_digest(assessment) != expected_digest:
+        raise AssessmentError("the triage assessment changed after it was prepared for review")
     targets = sorted({target["line"] for target in assessment["recommended_targets"]})
     results = [execute_target(line, assessment, issue_number) for line in targets]
     upsert_run_comment(
@@ -700,20 +678,6 @@ def self_test() -> None:
     parsed = assessment_from_comment({"body": body}, {"8.4"})
     if assessment_digest(parsed) != assessment_digest(assessment):
         raise AssertionError("assessment comment round trip failed")
-    ensure_assessment_predates_run(
-        {"updated_at": "2026-07-02T10:00:00Z"},
-        {"updated_at": "2026-07-02T10:01:00Z"},
-    )
-    try:
-        ensure_assessment_predates_run(
-            {"updated_at": "2026-07-02T10:02:00Z"},
-            {"updated_at": "2026-07-02T10:01:00Z"},
-        )
-    except AssessmentError as error:
-        if "changed after" not in str(error):
-            raise
-    else:
-        raise AssertionError("a post-approval assessment change should be rejected")
     print("self-test passed")
 
 

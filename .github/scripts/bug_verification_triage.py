@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import os
@@ -34,8 +35,7 @@ MAX_REPRO_STEPS = 25
 MAX_ASSERTIONS = 100
 MAX_REPRO_SQL_BYTES = 100_000
 VERSION = re.compile(r"^(8\.4|9\.7)(?:\.\d+)?$")
-TRIAGE_LABEL = "verification:triage"
-RERUN_LABEL = "verification:rerun"
+RUN_LABEL = "verification:run"
 TRIAGE_MARKER = "<!-- mysql-bug-verification-triage:v1 -->"
 TRIAGE_BOT = "github-actions[bot]"
 AFFECTED_LABELS = {"affected:8.4": "8.4", "affected:9.7": "9.7"}
@@ -376,6 +376,18 @@ def analyze(report: str, issue_id: str, affected_versions: list[str]) -> dict[st
     return parse_model_output(response.output_text, lines)
 
 
+def assessment_digest(assessment: dict[str, Any]) -> str:
+    canonical = json.dumps(assessment, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def set_github_output(name: str, value: str) -> None:
+    output_path = os.environ.get("GITHUB_OUTPUT")
+    if output_path:
+        with open(output_path, "a", encoding="utf-8") as output:
+            output.write(f"{name}={value}\n")
+
+
 def github_request(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
     token = os.environ.get("GITHUB_TOKEN")
     if not token:
@@ -516,10 +528,8 @@ def triage_github_event(event_path: Path) -> None:
     event_label = payload.get("label", {}).get("name")
     if not isinstance(issue, dict) or not repository:
         raise AssessmentError("GitHub event does not contain an issue and repository")
-    if event_label not in {TRIAGE_LABEL, RERUN_LABEL}:
-        raise AssessmentError(
-            f"GitHub event label must be {TRIAGE_LABEL!r} or {RERUN_LABEL!r}"
-        )
+    if event_label != RUN_LABEL:
+        raise AssessmentError(f"GitHub event label must be {RUN_LABEL!r}")
 
     issue_number = issue.get("number")
     if not isinstance(issue_number, int):
@@ -575,18 +585,11 @@ def triage_github_event(event_path: Path) -> None:
         return
 
     comments = list_issue_comments(repository, issue_number)
-    existing = find_triage_comment(comments)
-    if event_label == TRIAGE_LABEL and existing:
-        print("duplicate_suppressed; apply verification:rerun for another assessment")
-        return
-    if event_label == RERUN_LABEL and not existing:
-        print("rerun_suppressed; no existing triage assessment")
-        return
-
     assessment = analyze(body, f"{repository}#{issue_number}", versions)
     action = upsert_issue_comment(
         repository, issue_number, render_assessment(assessment), comments=comments
     )
+    set_github_output("assessment_digest", assessment_digest(assessment))
     print(action)
 
 
