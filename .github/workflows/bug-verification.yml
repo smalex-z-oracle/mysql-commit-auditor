@@ -3,43 +3,11 @@ name: Bug verification triage
 on:
   issues:
     types: [labeled]
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  smoke-test:
-    name: Call OCI Generative AI
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    environment: bug-verification-oci
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
-        with:
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.12"
-          cache: pip
-          cache-dependency-path: .github/bug-verification/requirements.txt
-
-      - name: Install OpenAI SDK
-        run: python -m pip install --requirement .github/bug-verification/requirements.txt
-
-      - name: Run OCI smoke test
-        env:
-          OCI_GENAI_API_KEY: ${{ secrets.OCI_GENAI_API_KEY }}
-          OCI_GENAI_BASE_URL: ${{ vars.OCI_GENAI_BASE_URL }}
-          OCI_GENAI_PROJECT: ${{ vars.OCI_GENAI_PROJECT }}
-          OCI_GENAI_MODEL: ${{ vars.OCI_GENAI_MODEL }}
-        run: python .github/scripts/bug_verification_triage.py --smoke-test
-
   triage:
     name: Draft issue triage
     if: >-

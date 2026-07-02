@@ -1,0 +1,160 @@
+name: MySQL bug report
+description: Report reproducible incorrect behavior in MySQL Server.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before submitting, search existing issues for the same behavior. Use Discussions for support questions or behavior you are not yet sure is a bug.
+
+        **Do not report suspected security vulnerabilities publicly.** Follow the repository's [private security-reporting process](https://github.com/smalex-z-oracle/mysql-commit-auditor/security/policy).
+
+  - type: checkboxes
+    id: preflight
+    attributes:
+      label: Preflight checks
+      options:
+        - label: I searched existing issues for a duplicate.
+          required: true
+        - label: I confirm this report does not contain a suspected security vulnerability, credentials, personal data, or confidential customer information.
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the suspected bug and its impact.
+      placeholder: What happened, and why do you believe this is a MySQL bug?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      description: Select the closest affected area.
+      options:
+        - SQL correctness
+        - Optimizer or performance
+        - DDL or DML
+        - InnoDB or storage engine
+        - Partitioning
+        - Replication or Group Replication
+        - Upgrade or downgrade
+        - Crash or memory issue
+        - Client, connector, or protocol
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: exact_version
+    attributes:
+      label: Exact MySQL version
+      description: Include the complete patch version reported by SELECT VERSION().
+      placeholder: 8.4.9
+    validations:
+      required: true
+
+  - type: dropdown
+    id: affected_line
+    attributes:
+      label: Affected release line
+      description: Select only lines on which you observed the behavior.
+      multiple: true
+      options:
+        - MySQL 8.4
+        - MySQL 9.7
+        - Other or unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include all relevant server, client, connector, platform, and configuration details.
+      value: |
+        - Operating system:
+        - CPU architecture:
+        - MySQL edition:
+        - Installation method:
+        - Client or connector and version:
+        - Relevant plugins or components:
+        - Non-default configuration:
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Steps
+      description: Provide complete, ordered steps that begin from a clean environment. Include setup SQL, test SQL, and an optional control case.
+      placeholder: |
+        1. Create the schema and test data.
+        2. Run the statement that demonstrates the problem.
+        3. Run any comparison or control statement.
+
+        ```sql
+        -- Complete self-contained reproduction
+        ```
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Result
+      description: State exactly what should happen, preferably as a machine-testable result, row count, value, error code, or server state.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Result
+      description: Include the observed result, rows, error code, crash, execution plan, or other behavior.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reproducibility
+    attributes:
+      label: Reproducibility
+      options:
+        - Always
+        - Intermittently
+        - Reproduced once
+        - Unable to reproduce again
+    validations:
+      required: true
+
+  - type: textarea
+    id: regression
+    attributes:
+      label: Regression Information
+      description: If known, provide the last working version and first affected version.
+      placeholder: |
+        - Last known working version:
+        - First known affected version:
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Logs and Diagnostics
+      description: Include only relevant excerpts. Remove credentials, personal data, and confidential information.
+      render: shell
+
+  - type: textarea
+    id: additional_context
+    attributes:
+      label: Additional Context
+      description: Add relevant traces, related reports, or other details needed for reproduction.
+
+  - type: textarea
+    id: suggested_fix
+    attributes:
+      label: Suggested Fix
+      description: Optional. Describe a possible approach; submit implementation code through a pull request.

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: MySQL questions and support
+    url: https://github.com/smalex-z-oracle/mysql-commit-auditor/discussions
+    about: Ask for help when you are not yet sure the behavior is a bug.
+  - name: Report a security vulnerability
+    url: https://www.oracle.com/corporate/security-practices/assurance/vulnerability/reporting.html
+    about: Report suspected security vulnerabilities privately; do not open a public issue.

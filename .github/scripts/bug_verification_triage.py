@@ -46,6 +46,16 @@ HARNESSES = {
     "sql-single-server", "mtr-existing-test", "mtr-sanitizer",
     "replication-topology", "protocol-fixture", "upgrade", "manual-or-security",
 }
+PROVENANCE_VALUES = {"reported", "inferred", "generated"}
+ASSERTION_TYPES = {
+    "statement_succeeds",
+    "statement_fails",
+    "error_code",
+    "row_count",
+    "rows_equal",
+    "output_contains",
+}
+STEP_ID = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 SYSTEM_PROMPT = """\
 You assist the MySQL Verification Team by triaging public bug reports and
@@ -63,7 +73,7 @@ authorized target from free-form report text. Return JSON only, without Markdown
 fences or explanatory text, using this shape:
 
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "classification": {
     "bug_class": "sql-correctness|optimizer|ddl-dml|crash-memory|replication|upgrade|performance|protocol|other",
     "security_sensitive": false,
@@ -78,17 +88,42 @@ fences or explanatory text, using this shape:
   "missing_information": [],
   "reproduction": {
     "setup_sql": null,
-    "test_sql": null,
-    "control_sql": null
+    "steps": [
+      {
+        "id": "descriptive_step_id",
+        "source": "reported|inferred|generated",
+        "sql": "SQL statement or query"
+      }
+    ],
+    "control_sql": null,
+    "cleanup_sql": null
   },
-  "expected": null,
+  "expected_behavior": null,
+  "actual_behavior": null,
+  "reproduction_assertions": [
+    {
+      "step_id": "descriptive_step_id",
+      "type": "statement_succeeds|statement_fails|error_code|row_count|rows_equal|output_contains",
+      "value": null
+    }
+  ],
   "recommended_harness": "sql-single-server|mtr-existing-test|mtr-sanitizer|replication-topology|protocol-fixture|upgrade|manual-or-security",
   "recommended_targets": [],
   "review_notes": []
 }
 
-For setup_sql, test_sql, control_sql, and expected, use an object with source
-(reported, inferred, or generated) and content or description when present.
+For setup_sql, control_sql, and cleanup_sql, use an object with source
+(reported, inferred, or generated) and content when present. A control is a
+comparison that should behave differently from the reported bug; cleanup SQL
+must never be placed in control_sql. Use source and description for
+expected_behavior and actual_behavior.
+
+Split the test into ordered, named reproduction steps. Assertions describe the
+reported bug condition that the harness must observe, not the desired corrected
+product behavior. For statement_succeeds and statement_fails omit value. For
+error_code and row_count use an integer value, for rows_equal use an array of
+rows, and for output_contains use a string value.
+
 Each recommended target must be an object with line (8.4 or 9.7) and basis. The
 model recommends targets; it never authorizes execution. If no canonical
 version is supplied, return no targets and include affected_version in
@@ -129,7 +164,9 @@ def parse_model_output(output_text: str, allowed_lines: set[str]) -> dict[str, A
         "reported_environment",
         "missing_information",
         "reproduction",
-        "expected",
+        "expected_behavior",
+        "actual_behavior",
+        "reproduction_assertions",
         "recommended_harness",
         "recommended_targets",
         "review_notes",
@@ -137,7 +174,7 @@ def parse_model_output(output_text: str, allowed_lines: set[str]) -> dict[str, A
     missing = required - assessment.keys()
     if missing:
         raise AssessmentError(f"model response is missing fields: {', '.join(sorted(missing))}")
-    if assessment["schema_version"] != 1:
+    if assessment["schema_version"] != 2:
         raise AssessmentError("model response has an unsupported schema_version")
     classification = assessment["classification"]
     if not isinstance(classification, dict):
@@ -157,8 +194,7 @@ def parse_model_output(output_text: str, allowed_lines: set[str]) -> dict[str, A
         raise AssessmentError("reported_environment must be an object")
     if not isinstance(assessment["missing_information"], list):
         raise AssessmentError("missing_information must be an array")
-    if not isinstance(assessment["reproduction"], dict):
-        raise AssessmentError("reproduction must be an object")
+    validate_reproduction(assessment["reproduction"], assessment, classification)
     if assessment["recommended_harness"] not in HARNESSES:
         raise AssessmentError("recommended_harness is not supported")
     if not isinstance(assessment["recommended_targets"], list):
@@ -174,10 +210,103 @@ def parse_model_output(output_text: str, allowed_lines: set[str]) -> dict[str, A
             raise AssessmentError(
                 f"recommended_targets[{index}] selects unauthorized version line {line!r}"
             )
+        if not isinstance(target.get("basis"), str) or not target["basis"].strip():
+            raise AssessmentError(f"recommended_targets[{index}].basis must be a string")
 
     if not allowed_lines and assessment["recommended_targets"]:
         raise AssessmentError("targets are not allowed without a canonical affected version")
     return assessment
+
+
+def validate_sourced_text(value: Any, path: str, text_field: str) -> None:
+    if value is None:
+        return
+    if not isinstance(value, dict):
+        raise AssessmentError(f"{path} must be an object or null")
+    if value.get("source") not in PROVENANCE_VALUES:
+        raise AssessmentError(f"{path}.source is not supported")
+    text = value.get(text_field)
+    if not isinstance(text, str) or not text.strip():
+        raise AssessmentError(f"{path}.{text_field} must be a non-empty string")
+
+
+def validate_reproduction(
+    reproduction: Any,
+    assessment: dict[str, Any],
+    classification: dict[str, Any],
+) -> None:
+    if not isinstance(reproduction, dict):
+        raise AssessmentError("reproduction must be an object")
+    required = {"setup_sql", "steps", "control_sql", "cleanup_sql"}
+    missing = required - reproduction.keys()
+    if missing:
+        raise AssessmentError(
+            f"reproduction is missing fields: {', '.join(sorted(missing))}"
+        )
+
+    validate_sourced_text(reproduction["setup_sql"], "reproduction.setup_sql", "content")
+    validate_sourced_text(reproduction["control_sql"], "reproduction.control_sql", "content")
+    validate_sourced_text(reproduction["cleanup_sql"], "reproduction.cleanup_sql", "content")
+    validate_sourced_text(assessment["expected_behavior"], "expected_behavior", "description")
+    validate_sourced_text(assessment["actual_behavior"], "actual_behavior", "description")
+
+    steps = reproduction["steps"]
+    if not isinstance(steps, list):
+        raise AssessmentError("reproduction.steps must be an array")
+    step_ids: set[str] = set()
+    for index, step in enumerate(steps):
+        path = f"reproduction.steps[{index}]"
+        if not isinstance(step, dict):
+            raise AssessmentError(f"{path} must be an object")
+        step_id = step.get("id")
+        if not isinstance(step_id, str) or not STEP_ID.fullmatch(step_id):
+            raise AssessmentError(f"{path}.id must be a safe snake_case identifier")
+        if step_id in step_ids:
+            raise AssessmentError(f"{path}.id is duplicated")
+        step_ids.add(step_id)
+        if step.get("source") not in PROVENANCE_VALUES:
+            raise AssessmentError(f"{path}.source is not supported")
+        if not isinstance(step.get("sql"), str) or not step["sql"].strip():
+            raise AssessmentError(f"{path}.sql must be a non-empty string")
+
+    assertions = assessment["reproduction_assertions"]
+    if not isinstance(assertions, list):
+        raise AssessmentError("reproduction_assertions must be an array")
+    for index, assertion in enumerate(assertions):
+        path = f"reproduction_assertions[{index}]"
+        if not isinstance(assertion, dict):
+            raise AssessmentError(f"{path} must be an object")
+        step_id = assertion.get("step_id")
+        if step_id not in step_ids:
+            raise AssessmentError(f"{path}.step_id does not reference a reproduction step")
+        assertion_type = assertion.get("type")
+        if assertion_type not in ASSERTION_TYPES:
+            raise AssessmentError(f"{path}.type is not supported")
+        value = assertion.get("value")
+        if assertion_type in {"statement_succeeds", "statement_fails"}:
+            if "value" in assertion and value is not None:
+                raise AssessmentError(f"{path}.value must be omitted for {assertion_type}")
+        elif assertion_type in {"error_code", "row_count"}:
+            if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                raise AssessmentError(f"{path}.value must be a non-negative integer")
+        elif assertion_type == "rows_equal" and not isinstance(value, list):
+            raise AssessmentError(f"{path}.value must be an array of rows")
+        elif assertion_type == "output_contains":
+            if not isinstance(value, str) or not value:
+                raise AssessmentError(f"{path}.value must be a non-empty string")
+
+    if (
+        classification["automation_readiness"] == "ready"
+        and assessment["recommended_harness"] == "sql-single-server"
+    ):
+        if not steps:
+            raise AssessmentError("ready SQL assessments require reproduction steps")
+        if not assertions:
+            raise AssessmentError("ready SQL assessments require reproduction assertions")
+        if assessment["expected_behavior"] is None or assessment["actual_behavior"] is None:
+            raise AssessmentError(
+                "ready SQL assessments require expected_behavior and actual_behavior"
+            )
 
 
 def create_client():
@@ -204,16 +333,6 @@ def selected_model() -> str:
     if model not in ALLOWED_MODELS:
         raise AssessmentError(f"OCI_GENAI_MODEL {model!r} is not in the approved model list")
     return model
-
-
-def smoke_test() -> None:
-    response = create_client().responses.create(
-        model=selected_model(),
-        input="Write a one-sentence bedtime story about a unicorn.",
-    )
-    if not response.output_text.strip():
-        raise AssessmentError("OCI smoke test returned no text")
-    print(response.output_text)
 
 
 def analyze(report: str, issue_id: str, affected_versions: list[str]) -> dict[str, Any]:
@@ -323,6 +442,7 @@ def render_assessment(assessment: dict[str, Any]) -> str:
         f"- Recommended harness: `{assessment['recommended_harness']}`",
         f"- Recommended version lines: {targets}",
         f"- Missing information: {missing_text}",
+        f"- Reproduction assertions: {len(assessment['reproduction_assertions'])}",
         f"- Confidence: {classification['confidence']:.2f}",
         "",
         "This is a triage aid for human review. It does not assign the official `Verified` status.",
@@ -354,7 +474,7 @@ def issue_declares_security(body: str) -> bool:
 def missing_required_sections(body: str) -> list[str]:
     headings = {
         match.group(1).strip().lower()
-        for match in re.finditer(r"(?im)^##\s+(.+?)\s*$", body)
+        for match in re.finditer(r"(?im)^#{2,3}\s+(.+?)\s*$", body)
     }
     return sorted(REQUIRED_SECTIONS - headings)
 
@@ -443,7 +563,7 @@ def triage_github_event(event_path: Path) -> None:
 def self_test() -> None:
     allowed = {"8.4"}
     assessment = {
-        "schema_version": 1,
+        "schema_version": 2,
         "classification": {
             "bug_class": "sql-correctness",
             "security_sensitive": False,
@@ -452,8 +572,35 @@ def self_test() -> None:
         },
         "reported_environment": {},
         "missing_information": [],
-        "reproduction": {},
-        "expected": None,
+        "reproduction": {
+            "setup_sql": {
+                "source": "reported",
+                "content": "CREATE TABLE t (a INT);",
+            },
+            "steps": [
+                {
+                    "id": "run_query",
+                    "source": "reported",
+                    "sql": "SELECT * FROM t;",
+                }
+            ],
+            "control_sql": None,
+            "cleanup_sql": {
+                "source": "generated",
+                "content": "DROP TABLE IF EXISTS t;",
+            },
+        },
+        "expected_behavior": {
+            "source": "reported",
+            "description": "The query returns no rows.",
+        },
+        "actual_behavior": {
+            "source": "reported",
+            "description": "The query returns one row.",
+        },
+        "reproduction_assertions": [
+            {"step_id": "run_query", "type": "row_count", "value": 1}
+        ],
         "recommended_harness": "sql-single-server",
         "recommended_targets": [
             {"line": "8.4", "basis": "canonical affected version"}
@@ -471,6 +618,16 @@ def self_test() -> None:
     else:
         raise AssertionError("cross-version target should have been rejected")
 
+    assessment["recommended_targets"][0]["line"] = "8.4"
+    assessment["reproduction_assertions"][0]["step_id"] = "missing_step"
+    try:
+        parse_model_output(json.dumps(assessment), allowed)
+    except AssessmentError as error:
+        if "does not reference" not in str(error):
+            raise
+    else:
+        raise AssertionError("assertion with an unknown step should have been rejected")
+
     complete_issue = """\
 ## Description
 Example.
@@ -483,6 +640,8 @@ Failure.
 """
     if missing_required_sections(complete_issue):
         raise AssertionError("complete issue should pass section validation")
+    if missing_required_sections(complete_issue.replace("## ", "### ")):
+        raise AssertionError("GitHub Issue Form headings should pass section validation")
     if "actual result" not in missing_required_sections("## Description\nExample"):
         raise AssertionError("incomplete issue should fail section validation")
 
@@ -501,15 +660,11 @@ def main() -> int:
     )
     parser.add_argument("--output", type=Path, help="write assessment JSON to this file")
     parser.add_argument("--self-test", action="store_true")
-    parser.add_argument("--smoke-test", action="store_true")
     parser.add_argument("--github-event", type=Path, help="process an issues:labeled event")
     args = parser.parse_args()
 
     if args.self_test:
         self_test()
-        return 0
-    if args.smoke_test:
-        smoke_test()
         return 0
     if args.github_event:
         triage_github_event(args.github_event)
