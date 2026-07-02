@@ -1,4 +1,4 @@
-name: Bug verification triage
+name: Bug verification
 
 on:
   issues:
@@ -49,3 +49,38 @@ jobs:
           OCI_GENAI_PROJECT: ${{ vars.OCI_GENAI_PROJECT }}
           OCI_GENAI_MODEL: ${{ vars.OCI_GENAI_MODEL }}
         run: python .github/scripts/bug_verification_triage.py --github-event "$GITHUB_EVENT_PATH"
+
+  execute:
+    name: Run approved reproduction
+    if: >-
+      github.event_name == 'issues' &&
+      github.event.label.name == 'verification:run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: bug-verification-run
+    permissions:
+      contents: read
+      issues: write
+
+    concurrency:
+      group: bug-verification-run-${{ github.event.issue.number }}
+      cancel-in-progress: false
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+
+      - name: Validate reproduction runner
+        run: python .github/scripts/bug_verification_runner.py --self-test
+
+      - name: Run approved reproduction
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python .github/scripts/bug_verification_runner.py --github-event "$GITHUB_EVENT_PATH"

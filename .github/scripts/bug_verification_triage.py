@@ -30,10 +30,14 @@ ALLOWED_MODELS = {
     "openai.gpt-oss-20b",
 }
 MAX_REPORT_BYTES = 100_000
+MAX_REPRO_STEPS = 25
+MAX_ASSERTIONS = 100
+MAX_REPRO_SQL_BYTES = 100_000
 VERSION = re.compile(r"^(8\.4|9\.7)(?:\.\d+)?$")
 TRIAGE_LABEL = "verification:triage"
 RERUN_LABEL = "verification:rerun"
 TRIAGE_MARKER = "<!-- mysql-bug-verification-triage:v1 -->"
+TRIAGE_BOT = "github-actions[bot]"
 AFFECTED_LABELS = {"affected:8.4": "8.4", "affected:9.7": "9.7"}
 SECURITY_LABELS = {"security", "security-vulnerability", "type:security"}
 REQUIRED_SECTIONS = {"description", "reproduction steps", "expected result", "actual result"}
@@ -253,7 +257,18 @@ def validate_reproduction(
     steps = reproduction["steps"]
     if not isinstance(steps, list):
         raise AssessmentError("reproduction.steps must be an array")
+    if len(steps) > MAX_REPRO_STEPS:
+        raise AssessmentError(f"reproduction.steps cannot exceed {MAX_REPRO_STEPS} entries")
     step_ids: set[str] = set()
+    sql_size = sum(
+        len(value["content"].encode("utf-8"))
+        for value in (
+            reproduction["setup_sql"],
+            reproduction["control_sql"],
+            reproduction["cleanup_sql"],
+        )
+        if value is not None
+    )
     for index, step in enumerate(steps):
         path = f"reproduction.steps[{index}]"
         if not isinstance(step, dict):
@@ -268,10 +283,20 @@ def validate_reproduction(
             raise AssessmentError(f"{path}.source is not supported")
         if not isinstance(step.get("sql"), str) or not step["sql"].strip():
             raise AssessmentError(f"{path}.sql must be a non-empty string")
+        sql_size += len(step["sql"].encode("utf-8"))
+
+    if sql_size > MAX_REPRO_SQL_BYTES:
+        raise AssessmentError(
+            f"reproduction SQL cannot exceed {MAX_REPRO_SQL_BYTES} bytes"
+        )
 
     assertions = assessment["reproduction_assertions"]
     if not isinstance(assertions, list):
         raise AssessmentError("reproduction_assertions must be an array")
+    if len(assertions) > MAX_ASSERTIONS:
+        raise AssessmentError(
+            f"reproduction_assertions cannot exceed {MAX_ASSERTIONS} entries"
+        )
     for index, assertion in enumerate(assertions):
         path = f"reproduction_assertions[{index}]"
         if not isinstance(assertion, dict):
@@ -388,7 +413,12 @@ def list_issue_comments(repository: str, issue_number: int) -> list[dict[str, An
 
 def find_triage_comment(comments: list[dict[str, Any]]) -> dict[str, Any] | None:
     return next(
-        (comment for comment in comments if TRIAGE_MARKER in (comment.get("body") or "")),
+        (
+            comment
+            for comment in comments
+            if TRIAGE_MARKER in (comment.get("body") or "")
+            and comment.get("user", {}).get("login") == TRIAGE_BOT
+        ),
         None,
     )
 
