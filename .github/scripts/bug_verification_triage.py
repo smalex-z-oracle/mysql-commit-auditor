@@ -479,7 +479,7 @@ def render_assessment(assessment: dict[str, Any]) -> str:
         "",
         "### Automated verification triage draft",
         "",
-        f"- Bug class: `{classification['bug_class']}`",
+        f"- Automation class: `{classification['bug_class']}`",
         f"- Automation readiness: `{classification['automation_readiness']}`",
         f"- Recommended harness: `{assessment['recommended_harness']}`",
         f"- Recommended version lines: {targets}",

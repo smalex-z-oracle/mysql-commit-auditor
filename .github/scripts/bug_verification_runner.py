@@ -508,7 +508,7 @@ def render_results(digest: str, results: list[dict[str, Any]]) -> str:
         "",
         "### Automated reproduction results",
         "",
-        f"- Approved assessment: `{digest}`",
+        f"- Assessment digest: `{digest}`",
     ]
     server_url = os.environ.get("GITHUB_SERVER_URL")
     repository = os.environ.get("GITHUB_REPOSITORY")
@@ -520,7 +520,7 @@ def render_results(digest: str, results: list[dict[str, Any]]) -> str:
     lines.extend(
         [
             "",
-            "`reproduced` means the approved assertions matched in the disposable test environment. It does not assign the official `Verified` status.",
+            "`reproduced` means every assessment assertion matched. `not_reproduced` means at least one assertion did not match in the tested environment. Neither status assigns the official `Verified` or `Not a Bug` status.",
             "",
         ]
     )
