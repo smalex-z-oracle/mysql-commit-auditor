@@ -5,12 +5,15 @@
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
 import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 
 BASE_URL = "https://inference.generativeai.us-chicago-1.oci.oraclecloud.com/openai/v1"
@@ -28,6 +31,21 @@ ALLOWED_MODELS = {
 }
 MAX_REPORT_BYTES = 100_000
 VERSION = re.compile(r"^(8\.4|9\.7)(?:\.\d+)?$")
+TRIAGE_LABEL = "verification:triage"
+RERUN_LABEL = "verification:rerun"
+TRIAGE_MARKER = "<!-- mysql-bug-verification-triage:v1 -->"
+AFFECTED_LABELS = {"affected:8.4": "8.4", "affected:9.7": "9.7"}
+SECURITY_LABELS = {"security", "security-vulnerability", "type:security"}
+REQUIRED_SECTIONS = {"description", "reproduction steps", "expected result", "actual result"}
+BUG_CLASSES = {
+    "sql-correctness", "optimizer", "ddl-dml", "crash-memory", "replication",
+    "upgrade", "performance", "protocol", "other",
+}
+READINESS_VALUES = {"ready", "needs_information", "manual", "unsupported"}
+HARNESSES = {
+    "sql-single-server", "mtr-existing-test", "mtr-sanitizer",
+    "replication-topology", "protocol-fixture", "upgrade", "manual-or-security",
+}
 
 SYSTEM_PROMPT = """\
 You assist the MySQL Verification Team by triaging public bug reports and
@@ -121,8 +139,32 @@ def parse_model_output(output_text: str, allowed_lines: set[str]) -> dict[str, A
         raise AssessmentError(f"model response is missing fields: {', '.join(sorted(missing))}")
     if assessment["schema_version"] != 1:
         raise AssessmentError("model response has an unsupported schema_version")
+    classification = assessment["classification"]
+    if not isinstance(classification, dict):
+        raise AssessmentError("classification must be an object")
+    if classification.get("bug_class") not in BUG_CLASSES:
+        raise AssessmentError("classification.bug_class is not supported")
+    if type(classification.get("security_sensitive")) is not bool:
+        raise AssessmentError("classification.security_sensitive must be a boolean")
+    if classification.get("automation_readiness") not in READINESS_VALUES:
+        raise AssessmentError("classification.automation_readiness is not supported")
+    confidence = classification.get("confidence")
+    if not isinstance(confidence, (int, float)) or isinstance(confidence, bool):
+        raise AssessmentError("classification.confidence must be a number")
+    if not 0 <= confidence <= 1:
+        raise AssessmentError("classification.confidence must be between 0 and 1")
+    if not isinstance(assessment["reported_environment"], dict):
+        raise AssessmentError("reported_environment must be an object")
+    if not isinstance(assessment["missing_information"], list):
+        raise AssessmentError("missing_information must be an array")
+    if not isinstance(assessment["reproduction"], dict):
+        raise AssessmentError("reproduction must be an object")
+    if assessment["recommended_harness"] not in HARNESSES:
+        raise AssessmentError("recommended_harness is not supported")
     if not isinstance(assessment["recommended_targets"], list):
         raise AssessmentError("recommended_targets must be an array")
+    if not isinstance(assessment["review_notes"], list):
+        raise AssessmentError("review_notes must be an array")
 
     for index, target in enumerate(assessment["recommended_targets"]):
         if not isinstance(target, dict):
@@ -151,14 +193,14 @@ def create_client():
         ) from error
 
     return OpenAI(
-        base_url=os.environ.get("OCI_GENAI_BASE_URL", BASE_URL),
+        base_url=os.environ.get("OCI_GENAI_BASE_URL") or BASE_URL,
         api_key=api_key,
-        project=os.environ.get("OCI_GENAI_PROJECT", PROJECT),
+        project=os.environ.get("OCI_GENAI_PROJECT") or PROJECT,
     )
 
 
 def selected_model() -> str:
-    model = os.environ.get("OCI_GENAI_MODEL", DEFAULT_MODEL)
+    model = os.environ.get("OCI_GENAI_MODEL") or DEFAULT_MODEL
     if model not in ALLOWED_MODELS:
         raise AssessmentError(f"OCI_GENAI_MODEL {model!r} is not in the approved model list")
     return model
@@ -190,11 +232,224 @@ def analyze(report: str, issue_id: str, affected_versions: list[str]) -> dict[st
     return parse_model_output(response.output_text, lines)
 
 
+def github_request(method: str, path: str, body: dict[str, Any] | None = None) -> Any:
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise AssessmentError("GITHUB_TOKEN is not set")
+    api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+    request = Request(
+        f"{api_url}{path}",
+        method=method,
+        data=json.dumps(body).encode("utf-8") if body is not None else None,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "mysql-bug-verification-triage",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            raw = response.read()
+    except HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")[:1000]
+        raise AssessmentError(f"GitHub API {error.code}: {detail}") from error
+    return json.loads(raw) if raw else None
+
+
+def list_issue_comments(repository: str, issue_number: int) -> list[dict[str, Any]]:
+    comments = github_request(
+        "GET", f"/repos/{repository}/issues/{issue_number}/comments?per_page=100"
+    )
+    if not isinstance(comments, list):
+        raise AssessmentError("GitHub comments response must be an array")
+    return comments
+
+
+def find_triage_comment(comments: list[dict[str, Any]]) -> dict[str, Any] | None:
+    return next(
+        (comment for comment in comments if TRIAGE_MARKER in (comment.get("body") or "")),
+        None,
+    )
+
+
+def upsert_issue_comment(
+    repository: str,
+    issue_number: int,
+    body: str,
+    comments: list[dict[str, Any]] | None = None,
+) -> str:
+    existing = find_triage_comment(
+        comments if comments is not None else list_issue_comments(repository, issue_number)
+    )
+    if existing:
+        github_request(
+            "PATCH", f"/repos/{repository}/issues/comments/{existing['id']}", {"body": body}
+        )
+        return "comment_updated"
+    github_request("POST", f"/repos/{repository}/issues/{issue_number}/comments", {"body": body})
+    return "comment_created"
+
+
+def simple_comment(message: str) -> str:
+    return "\n".join(
+        [
+            TRIAGE_MARKER,
+            "",
+            "### Automated verification triage draft",
+            "",
+            message,
+            "",
+            "This is a triage aid for human review. It does not assign the official `Verified` status.",
+        ]
+    )
+
+
+def render_assessment(assessment: dict[str, Any]) -> str:
+    classification = assessment["classification"]
+    targets = ", ".join(
+        str(target.get("line")) for target in assessment["recommended_targets"]
+    ) or "None"
+    missing = assessment["missing_information"]
+    missing_text = ", ".join(str(item) for item in missing) if missing else "None"
+    lines = [
+        TRIAGE_MARKER,
+        "",
+        "### Automated verification triage draft",
+        "",
+        f"- Bug class: `{classification['bug_class']}`",
+        f"- Automation readiness: `{classification['automation_readiness']}`",
+        f"- Recommended harness: `{assessment['recommended_harness']}`",
+        f"- Recommended version lines: {targets}",
+        f"- Missing information: {missing_text}",
+        f"- Confidence: {classification['confidence']:.2f}",
+        "",
+        "This is a triage aid for human review. It does not assign the official `Verified` status.",
+    ]
+    if classification["security_sensitive"]:
+        lines.extend(
+            [
+                "",
+                "Potential security-sensitive content was identified. Detailed model output is not posted publicly; route this report to the approved security process.",
+            ]
+        )
+    else:
+        raw = html.escape(json.dumps(assessment, indent=2, ensure_ascii=False))
+        if len(raw) > 50_000:
+            raw = raw[:50_000] + "\n… output truncated …"
+        lines.extend(["", "<details><summary>Structured assessment</summary>", "", f"<pre>{raw}</pre>", "", "</details>"])
+    return "\n".join(lines)
+
+
+def issue_declares_security(body: str) -> bool:
+    return bool(
+        re.search(
+            r"(?ims)^##\s+(?:security|security vulnerability)\s*$.*?^\s*(?:yes|true)\s*$",
+            body,
+        )
+    )
+
+
+def missing_required_sections(body: str) -> list[str]:
+    headings = {
+        match.group(1).strip().lower()
+        for match in re.finditer(r"(?im)^##\s+(.+?)\s*$", body)
+    }
+    return sorted(REQUIRED_SECTIONS - headings)
+
+
+def triage_github_event(event_path: Path) -> None:
+    payload = json.loads(event_path.read_text(encoding="utf-8"))
+    issue = payload.get("issue")
+    repository = payload.get("repository", {}).get("full_name")
+    event_label = payload.get("label", {}).get("name")
+    if not isinstance(issue, dict) or not repository:
+        raise AssessmentError("GitHub event does not contain an issue and repository")
+    if event_label not in {TRIAGE_LABEL, RERUN_LABEL}:
+        raise AssessmentError(
+            f"GitHub event label must be {TRIAGE_LABEL!r} or {RERUN_LABEL!r}"
+        )
+
+    issue_number = issue.get("number")
+    if not isinstance(issue_number, int):
+        raise AssessmentError("GitHub issue number is missing")
+    body = issue.get("body") or ""
+    if len(body.encode("utf-8")) > MAX_REPORT_BYTES:
+        action = upsert_issue_comment(
+            repository,
+            issue_number,
+            simple_comment("The issue body exceeds the triage input limit. No OCI call was made."),
+        )
+        print(action)
+        return
+
+    labels = {
+        label.get("name") for label in issue.get("labels", []) if isinstance(label, dict)
+    }
+    if labels & SECURITY_LABELS or issue_declares_security(body):
+        action = upsert_issue_comment(
+            repository,
+            issue_number,
+            simple_comment(
+                "This report is marked as potentially security-sensitive. No OCI call was made; route it to the approved private security process."
+            ),
+        )
+        print(action)
+        return
+
+    versions = sorted(value for label, value in AFFECTED_LABELS.items() if label in labels)
+    if not versions:
+        action = upsert_issue_comment(
+            repository,
+            issue_number,
+            simple_comment(
+                "Add `affected:8.4`, `affected:9.7`, or both before requesting triage. No OCI call was made."
+            ),
+        )
+        print(action)
+        return
+
+    missing_sections = missing_required_sections(body)
+    if missing_sections:
+        action = upsert_issue_comment(
+            repository,
+            issue_number,
+            simple_comment(
+                "The issue is missing required sections: "
+                + ", ".join(f"`{section}`" for section in missing_sections)
+                + ". No OCI call was made."
+            ),
+        )
+        print(action)
+        return
+
+    comments = list_issue_comments(repository, issue_number)
+    existing = find_triage_comment(comments)
+    if event_label == TRIAGE_LABEL and existing:
+        print("duplicate_suppressed; apply verification:rerun for another assessment")
+        return
+    if event_label == RERUN_LABEL and not existing:
+        print("rerun_suppressed; no existing triage assessment")
+        return
+
+    assessment = analyze(body, f"{repository}#{issue_number}", versions)
+    action = upsert_issue_comment(
+        repository, issue_number, render_assessment(assessment), comments=comments
+    )
+    print(action)
+
+
 def self_test() -> None:
     allowed = {"8.4"}
     assessment = {
         "schema_version": 1,
-        "classification": {},
+        "classification": {
+            "bug_class": "sql-correctness",
+            "security_sensitive": False,
+            "automation_readiness": "ready",
+            "confidence": 0.9,
+        },
         "reported_environment": {},
         "missing_information": [],
         "reproduction": {},
@@ -216,6 +471,21 @@ def self_test() -> None:
     else:
         raise AssertionError("cross-version target should have been rejected")
 
+    complete_issue = """\
+## Description
+Example.
+## Reproduction Steps
+Run the example.
+## Expected Result
+Success.
+## Actual Result
+Failure.
+"""
+    if missing_required_sections(complete_issue):
+        raise AssertionError("complete issue should pass section validation")
+    if "actual result" not in missing_required_sections("## Description\nExample"):
+        raise AssertionError("incomplete issue should fail section validation")
+
     print("self-test passed")
 
 
@@ -232,6 +502,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, help="write assessment JSON to this file")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--smoke-test", action="store_true")
+    parser.add_argument("--github-event", type=Path, help="process an issues:labeled event")
     args = parser.parse_args()
 
     if args.self_test:
@@ -239,6 +510,9 @@ def main() -> int:
         return 0
     if args.smoke_test:
         smoke_test()
+        return 0
+    if args.github_event:
+        triage_github_event(args.github_event)
         return 0
     if args.issue_file is None:
         parser.error("--issue-file is required unless a test mode is used")

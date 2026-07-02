@@ -1,0 +1,4 @@
+/.github/CODEOWNERS @smalex-z-oracle
+/.github/workflows/bug-verification.yml @smalex-z-oracle
+/.github/scripts/bug_verification_triage.py @smalex-z-oracle
+/.github/bug-verification/requirements.txt @smalex-z-oracle
