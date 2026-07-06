@@ -85,3 +85,29 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXPECTED_ASSESSMENT_DIGEST: ${{ needs.triage.outputs.assessment_digest }}
         run: python .github/scripts/bug_verification_runner.py --github-event "$GITHUB_EVENT_PATH"
+
+  finalize:
+    name: Make verification retriggerable
+    needs: [triage, execute]
+    if: >-
+      always() &&
+      github.event_name == 'issues' &&
+      github.event.label.name == 'verification:run'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+        with:
+          persist-credentials: false
+
+      - name: Remove verification trigger label
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python .github/scripts/bug_verification_triage.py
+          --remove-run-label-event "$GITHUB_EVENT_PATH"

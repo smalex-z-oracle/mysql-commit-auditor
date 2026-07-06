@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
@@ -593,7 +594,35 @@ def triage_github_event(event_path: Path) -> None:
     print(action)
 
 
+def remove_run_label(event_path: Path) -> None:
+    payload = json.loads(event_path.read_text(encoding="utf-8"))
+    issue = payload.get("issue")
+    repository = payload.get("repository", {}).get("full_name")
+    if not isinstance(issue, dict) or not repository:
+        raise AssessmentError("GitHub event does not contain an issue and repository")
+    issue_number = issue.get("number")
+    if not isinstance(issue_number, int):
+        raise AssessmentError("GitHub issue number is missing")
+
+    current = github_request("GET", f"/repos/{repository}/issues/{issue_number}")
+    labels = {
+        label.get("name")
+        for label in current.get("labels", [])
+        if isinstance(label, dict)
+    }
+    if RUN_LABEL not in labels:
+        print("run_label_already_removed")
+        return
+    encoded_label = quote(RUN_LABEL, safe="")
+    github_request(
+        "DELETE", f"/repos/{repository}/issues/{issue_number}/labels/{encoded_label}"
+    )
+    print("run_label_removed")
+
+
 def self_test() -> None:
+    if quote(RUN_LABEL, safe="") != "verification%3Arun":
+        raise AssertionError("verification trigger label must be URL encoded")
     allowed = {"8.4"}
     assessment = {
         "schema_version": 2,
@@ -694,6 +723,11 @@ def main() -> int:
     parser.add_argument("--output", type=Path, help="write assessment JSON to this file")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--github-event", type=Path, help="process an issues:labeled event")
+    parser.add_argument(
+        "--remove-run-label-event",
+        type=Path,
+        help="remove verification:run after processing an issues:labeled event",
+    )
     args = parser.parse_args()
 
     if args.self_test:
@@ -701,6 +735,9 @@ def main() -> int:
         return 0
     if args.github_event:
         triage_github_event(args.github_event)
+        return 0
+    if args.remove_run_label_event:
+        remove_run_label(args.remove_run_label_event)
         return 0
     if args.issue_file is None:
         parser.error("--issue-file is required unless a test mode is used")
