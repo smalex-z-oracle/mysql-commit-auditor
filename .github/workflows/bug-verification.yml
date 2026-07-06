@@ -87,7 +87,7 @@ jobs:
         run: python .github/scripts/bug_verification_runner.py --github-event "$GITHUB_EVENT_PATH"
 
   finalize:
-    name: Make verification retriggerable
+    name: Reset verification trigger
     needs: [triage, execute]
     if: >-
       always() &&
